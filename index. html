@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VisionGuide AR-SOP | Endüstriyel Simülasyon</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM CDN -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+        @keyframes scan { 0% { top: 5%; } 100% { top: 95%; } }
+        .animate-scan { animation: scan 2s ease-in-out infinite; }
+        body { margin: 0; padding: 0; overflow: hidden; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        
+        // Lucide Icon Wrapper Component - Fixed for CDN usage
+        const Icon = ({ name, size = 24, className = "" }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (iconRef.current && window.lucide) {
+                    // Convert PascalCase (ShieldAlert) to kebab-case (shield-alert) for Lucide CDN
+                    const kebabName = name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+                    iconRef.current.innerHTML = `<i data-lucide="${kebabName}"></i>`;
+                    window.lucide.createIcons({
+                        attrs: {
+                            width: size,
+                            height: size,
+                            class: className
+                        }
+                    });
+                }
+            }, [name, size, className]);
+            return <span ref={iconRef} className="inline-flex items-center justify-center" />;
+        };
+
+        const App = () => {
+            const [view, setView] = useState('dual'); 
+            const [isScanning, setIsScanning] = useState(false);
+            const [showAR, setShowAR] = useState(false);
+            const [progress, setProgress] = useState(0);
+            const [activeSOP, setActiveSOP] = useState(null);
+            const [currentStep, setCurrentStep] = useState(0);
+            const [arTab, setArTab] = useState('steps');
+            const [cameraError, setCameraError] = useState(null);
+            const [isAuthenticated, setIsAuthenticated] = useState(false);
+            const [engineerPassword, setEngineerPassword] = useState('1234'); 
+            const [accessKey, setAccessKey] = useState('');
+            const [authError, setAuthError] = useState('');
+            const [editingSop, setEditingSop] = useState(null);
+            const [showPasswordSettings, setShowPasswordSettings] = useState(false);
+            const [passUpdate, setPassUpdate] = useState({ old: '', new: '', confirm: '' });
+            const [passStatus, setPassStatus] = useState({ type: '', msg: '' });
+
+            const videoRef = useRef(null);
+            const streamRef = useRef(null);
+
+            const [library, setLibrary] = useState([
+                {
+                    id: 'loto',
+                    title: 'LOTO (Kilitleme-Etiketleme)',
+                    icon: 'ShieldAlert',
+                    description: 'Enerji kesme ve güvenlik kilidi prosedürü.',
+                    steps: ['Enerji kaynaklarını belirle.', 'Kalıntı enerjiyi boşalt.', 'Kilidi yerleştir.'],
+                    tools: ['LOTO Kilidi', 'Multimetre'],
+                    videoTitle: 'LOTO Güvenlik Eğitimi V1',
+                    videoUrl: '#',
+                    imageUrl: 'https://images.unsplash.com/photo-1590483734724-383b853b237d?auto=format&fit=crop&q=80&w=400'
+                },
+                {
+                    id: 'maintenance',
+                    title: 'CNC Haftalık Bakım',
+                    icon: 'Wrench',
+                    description: 'Periyodik yağlama ve filtre kontrolü.',
+                    steps: ['Yağ seviyesini kontrol et.', 'Filtreleri temizle.', 'Rulmanları gresle.'],
+                    tools: ['Gres Tabancası', 'Hava Tabancası'],
+                    videoTitle: 'CNC Bakım Rehberi',
+                    videoUrl: '#',
+                    imageUrl: 'https://images.unsplash.com/photo-1537462715879-360eeb61a0ad?auto=format&fit=crop&q=80&w=400'
+                }
+            ]);
+
+            const [newSop, setNewSop] = useState({
+                title: '', description: '', steps: [''], tools: [''], videoTitle: '', videoUrl: '',
+                imageUrl: 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?auto=format&fit=crop&q=80&w=400'
+            });
+
+            const handleAuth = (e) => {
+                e.preventDefault();
+                if (accessKey === engineerPassword) { 
+                    setIsAuthenticated(true);
+                    setAuthError('');
+                } else {
+                    setAuthError('Geçersiz erişim anahtarı.');
+                }
+            };
+
+            const handlePasswordChange = (e) => {
+                e.preventDefault();
+                if (passUpdate.old !== engineerPassword) {
+                    setPassStatus({ type: 'error', msg: 'Mevcut şifre hatalı!' });
+                    return;
+                }
+                if (passUpdate.new !== passUpdate.confirm) {
+                    setPassStatus({ type: 'error', msg: 'Yeni şifreler eşleşmiyor!' });
+                    return;
+                }
+                setEngineerPassword(passUpdate.new);
+                setPassStatus({ type: 'success', msg: 'Şifre başarıyla güncellendi.' });
+                setTimeout(() => {
+                    setPassStatus({ type: '', msg: '' });
+                    setShowPasswordSettings(false);
+                    setPassUpdate({ old: '', new: '', confirm: '' });
+                }, 1500);
+            };
+
+            const startCamera = async () => {
+                setCameraError(null);
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: 'environment' },
+                        audio: false 
+                    });
+                    if (videoRef.current) {
+                        videoRef.current.srcObject = stream;
+                        streamRef.current = stream;
+                    }
+                    setIsScanning(true);
+                    setProgress(0);
+                } catch (err) {
+                    setCameraError("Kamera izni verilmedi.");
+                }
+            };
+
+            const stopCamera = () => {
+                if (streamRef.current) {
+                    streamRef.current.getTracks().forEach(track => track.stop());
+                }
+            };
+
+            useEffect(() => {
+                let interval;
+                if (isScanning && !showAR) {
+                    interval = setInterval(() => {
+                        setProgress((prev) => {
+                            if (prev >= 100) {
+                                clearInterval(interval);
+                                const randomSOP = library[Math.floor(Math.random() * library.length)];
+                                setActiveSOP(randomSOP);
+                                setShowAR(true);
+                                setIsScanning(false);
+                                return 100;
+                            }
+                            return prev + 10;
+                        });
+                    } , 100);
+                }
+                return () => clearInterval(interval);
+            }, [isScanning, library, showAR]);
+
+            const handleSaveSop = () => {
+                if (editingSop) {
+                    setLibrary(library.map(s => s.id === editingSop.id ? {...newSop, id: editingSop.id} : s));
+                    if (activeSOP && activeSOP.id === editingSop.id) {
+                        setActiveSOP({...newSop, id: editingSop.id});
+                    }
+                    setEditingSop(null);
+                } else {
+                    const id = newSop.title.toLowerCase().replace(/\s+/g, '-');
+                    setLibrary([...library, { ...newSop, id, icon: 'FileText' }]);
+                }
+                resetForm();
+            };
+
+            const startEditing = (sop) => {
+                setEditingSop(sop);
+                setNewSop({...sop});
+                setShowPasswordSettings(false);
+            };
+
+            const resetForm = () => {
+                setNewSop({ 
+                    title: '', description: '', steps: [''], tools: [''], videoTitle: '', videoUrl: '',
+                    imageUrl: 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?auto=format&fit=crop&q=80&w=400' 
+                });
+                setEditingSop(null);
+            };
+
+            const updateStep = (index, value) => {
+                const updatedSteps = [...newSop.steps];
+                updatedSteps[index] = value;
+                setNewSop({ ...newSop, steps: updatedSteps });
+            };
+
+            const addStepField = () => setNewSop({ ...newSop, steps: [...newSop.steps, ''] });
+
+            const resetSim = () => {
+                stopCamera();
+                setShowAR(false);
+                setIsScanning(false);
+                setActiveSOP(null);
+                setCurrentStep(0);
+                setArTab('steps');
+            };
+
+            const triggerQRScan = (sopId) => {
+                const selected = library.find(s => s.id === sopId);
+                if (selected) {
+                    setActiveSOP(selected);
+                    setShowAR(true);
+                    if (view !== 'dual') setView('operator');
+                }
+            };
+
+            const OperatorSection = () => (
+                <div className="flex flex-col items-center justify-center p-4 h-full bg-slate-100/50 relative overflow-hidden">
+                    <div className="relative w-full max-w-[320px] aspect-[9/18.5] bg-black rounded-[3rem] border-[10px] border-slate-900 shadow-2xl overflow-hidden ring-1 ring-slate-800 flex flex-col z-10">
+                        <div className="flex-1 relative bg-black overflow-hidden">
+                            <video ref={videoRef} autoPlay playsInline muted className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-700 ${isScanning || showAR ? 'opacity-100' : 'opacity-30'}`} />
+
+                            {!showAR && !isScanning && (
+                                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center p-6 text-center bg-black/70 backdrop-blur-sm">
+                                    <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center border border-white/10 mb-6 animate-pulse">
+                                        <Icon name="Smartphone" size={28} className="text-white/20" />
+                                    </div>
+                                    <h2 className="text-lg font-black text-white mb-2 tracking-tight">QR Okutun</h2>
+                                    <p className="text-[10px] text-slate-400 mb-8 leading-relaxed px-2 text-center">Kamerayı QR koda odaklayın. Mühendisler tarafından hazırlanan talimatlar otomatik gelecektir.</p>
+                                    <button onClick={startCamera} className="w-full py-3 bg-blue-600 text-white text-xs font-bold rounded-xl shadow-lg active:scale-95 transition-all">
+                                        TARAMAYI BAŞLAT
+                                    </button>
+                                </div>
+                            )}
+
+                            {isScanning && (
+                                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-blue-900/10">
+                                    <div className="w-48 h-48 border border-blue-400/50 rounded-2xl relative overflow-hidden">
+                                        <div className="absolute top-0 w-full h-[2px] bg-blue-400 shadow-[0_0_15px_#60a5fa] animate-scan"></div>
+                                    </div>
+                                    <p className="text-white text-[8px] mt-6 font-black tracking-[0.4em] uppercase animate-pulse text-center">Analiz Ediliyor...</p>
+                                </div>
+                            )}
+
+                            {showAR && activeSOP && (
+                                <div className="absolute inset-0 z-30 flex flex-col bg-white text-slate-900 animate-in slide-in-from-bottom duration-500 rounded-t-[2.5rem] mt-20">
+                                    <div className="bg-slate-900 p-4 text-white relative rounded-t-[2.5rem]">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <span className="text-[8px] font-black text-blue-400 uppercase tracking-tighter italic">Operatör Terminali</span>
+                                            <button onClick={resetSim} className="text-slate-500 hover:text-white transition-colors"><Icon name="X" size={16}/></button>
+                                        </div>
+                                        <h3 className="text-sm font-black leading-tight mt-1">{activeSOP.title}</h3>
+                                        <div className="flex gap-1 mt-4">
+                                            {activeSOP.steps.map((_, i) => <div key={i} className={`h-1 flex-1 rounded-full ${i <= currentStep ? 'bg-blue-500 shadow-[0_0_8px_#3b82f6]' : 'bg-slate-800'}`}></div>)}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex border-b text-[8px] font-black bg-slate-50 uppercase tracking-widest">
+                                        <button onClick={() => setArTab('steps')} className={`flex-1 py-3 ${arTab === 'steps' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-slate-400'}`}>Talimatlar</button>
+                                        <button onClick={() => setArTab('video')} className={`flex-1 py-3 ${arTab === 'video' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-slate-400'}`}>Video</button>
+                                    </div>
+
+                                    <div className="p-5 flex-1 overflow-y-auto custom-scrollbar">
+                                        {arTab === 'steps' ? (
+                                            <div className="animate-in fade-in">
+                                                <p className="text-[9px] font-bold text-blue-600 mb-1 uppercase">ADIM {currentStep + 1} / {activeSOP.steps.length}</p>
+                                                <p className="text-sm font-bold text-slate-800 leading-tight mb-4">{activeSOP.steps[currentStep]}</p>
+                                                <div className="p-3 bg-amber-50 rounded-xl border border-amber-100 flex gap-2 items-start">
+                                                    <Icon name="AlertTriangle" size={14} className="text-amber-600 shrink-0 mt-0.5" />
+                                                    <p className="text-[9px] text-amber-900 font-medium leading-relaxed">Mühendis Notu: Güvenlik araçlarını kontrol edin.</p>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="animate-in slide-in-from-right text-center">
+                                                <div className="aspect-video bg-slate-900 rounded-2xl overflow-hidden relative shadow-md mb-3">
+                                                    <img src={activeSOP.imageUrl} className="w-full h-full object-cover opacity-40" alt="Video" />
+                                                    <div className="absolute inset-0 flex items-center justify-center text-white/40">
+                                                        <Icon name="Play" size={24} />
+                                                    </div>
+                                                </div>
+                                                <h4 className="font-bold text-slate-800 text-[10px]">{activeSOP.videoTitle}</h4>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="p-5 bg-slate-50 border-t">
+                                        <button onClick={() => currentStep < activeSOP.steps.length - 1 ? setCurrentStep(currentStep + 1) : resetSim()} className="w-full bg-slate-900 text-white py-3 rounded-xl text-xs font-black active:scale-95 transition-transform uppercase">
+                                            {currentStep === activeSOP.steps.length - 1 ? 'Tamamla' : 'Onayla'}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        <div className="h-4 bg-slate-900 flex items-center justify-center">
+                            <div className="w-12 h-1 bg-slate-700 rounded-full"></div>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const EngineerSection = () => (
+                <div className="flex-1 p-6 overflow-y-auto h-full custom-scrollbar">
+                    {!isAuthenticated ? (
+                        <div className="max-w-md mx-auto mt-10 p-8 bg-white rounded-3xl border border-slate-200 shadow-xl text-center space-y-6">
+                            <Icon name="Lock" size={32} className="mx-auto text-blue-600" />
+                            <h2 className="text-xl font-black text-slate-900">Mühendis Erişimi</h2>
+                            <form onSubmit={handleAuth} className="space-y-4">
+                                <input 
+                                    type="password" 
+                                    placeholder="Erişim Şifresi" 
+                                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-center text-lg font-black tracking-[0.5em] focus:ring-2 ring-blue-500/20 outline-none"
+                                    value={accessKey}
+                                    onChange={(e) => setAccessKey(e.target.value)}
+                                />
+                                {authError && <p className="text-[10px] text-red-500 font-bold uppercase tracking-widest">{authError}</p>}
+                                <button type="submit" className="w-full bg-slate-900 text-white py-4 rounded-xl font-black hover:bg-black transition-all">GİRİŞ YAP</button>
+                            </form>
+                        </div>
+                    ) : (
+                        <div className="space-y-8 animate-in fade-in duration-500">
+                            <div className="flex justify-between items-center border-b border-slate-200 pb-4">
+                                <div>
+                                    <h2 className="text-2xl font-black text-slate-900 tracking-tight">Prosedür Yönetimi</h2>
+                                    <p className="text-[10px] text-slate-400 font-bold uppercase">Mühendis Paneli</p>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <button onClick={() => { setShowPasswordSettings(!showPasswordSettings); setEditingSop(null); }}
+                                        className={`p-2 rounded-xl transition-all ${showPasswordSettings ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>
+                                        <Icon name="Key" size={18} />
+                                    </button>
+                                    <button onClick={() => setIsAuthenticated(false)} className="p-2 bg-red-50 text-red-500 rounded-xl hover:bg-red-500 hover:text-white transition-all">
+                                        <Icon name="Unlock" size={18} />
+                                    </button>
+                                </div>
+                            </div>
+
+                            {showPasswordSettings && (
+                                <div className="bg-indigo-50 rounded-3xl p-6 border border-indigo-100 space-y-4 animate-in slide-in-from-top">
+                                    <h3 className="font-bold text-indigo-900 flex items-center gap-2 text-sm"><Icon name="Settings" size={16}/> Şifre Güncelleme</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                        <input type="password" placeholder="Eski Şifre" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" value={passUpdate.old} onChange={e => setPassUpdate({...passUpdate, old: e.target.value})} />
+                                        <input type="password" placeholder="Yeni Şifre" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" value={passUpdate.new} onChange={e => setPassUpdate({...passUpdate, new: e.target.value})} />
+                                        <input type="password" placeholder="Yeni (Tekrar)" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" value={passUpdate.confirm} onChange={e => setPassUpdate({...passUpdate, confirm: e.target.value})} />
+                                    </div>
+                                    {passStatus.msg && <p className={`text-[9px] font-bold uppercase ${passStatus.type === 'error' ? 'text-red-500' : 'text-green-600'}`}>{passStatus.msg}</p>}
+                                    <div className="flex justify-end"><button onClick={handlePasswordChange} className="bg-indigo-600 text-white px-6 py-2 rounded-xl text-xs font-bold">Kaydet</button></div>
+                                </div>
+                            )}
+
+                            <div className="grid grid-cols-1 gap-8">
+                                <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
+                                    <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                                        {editingSop ? <Icon name="Edit" size={18} className="text-orange-500" /> : <Icon name="Plus" size={18} className="text-blue-500" />}
+                                        {editingSop ? 'SOP Düzenle' : 'Yeni SOP Ekle'}
+                                    </h3>
+                                    <input type="text" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold" placeholder="SOP Başlığı" value={newSop.title} onChange={e => setNewSop({...newSop, title: e.target.value})} />
+                                    
+                                    <div className="space-y-2">
+                                        {newSop.steps.map((step, i) => (
+                                            <div key={i} className="flex gap-2">
+                                                <span className="w-8 h-10 flex items-center justify-center font-bold text-slate-400 bg-slate-50 rounded-lg text-xs">{i+1}</span>
+                                                <input type="text" className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-xs" value={step} onChange={(e) => updateStep(i, e.target.value)} />
+                                            </div>
+                                        ))}
+                                        <button onClick={addStepField} className="text-[10px] font-black text-blue-500 uppercase tracking-widest">+ Adım Ekle</button>
+                                    </div>
+
+                                    <div className="flex gap-2">
+                                        {editingSop && <button onClick={resetForm} className="flex-1 bg-slate-100 py-3 rounded-xl font-bold text-xs">İptal</button>}
+                                        <button onClick={handleSaveSop} className={`flex-[2] text-white py-3 rounded-xl font-bold text-xs ${editingSop ? 'bg-orange-500' : 'bg-blue-600'}`}>Kaydet</button>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-4 pb-10">
+                                    {library.map(sop => (
+                                        <div key={sop.id} className={`bg-white p-4 rounded-2xl border flex justify-between items-center group transition-all ${editingSop?.id === sop.id ? 'border-orange-400 ring-2 ring-orange-50' : 'border-slate-200 shadow-sm hover:shadow-md'}`}>
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-10 h-10 rounded-lg bg-slate-50 flex items-center justify-center border border-slate-100">
+                                                    <Icon name={sop.icon} size={18} className={sop.icon === 'ShieldAlert' ? 'text-red-500' : 'text-orange-500'} />
+                                                </div>
+                                                <div>
+                                                    <h4 className="font-bold text-slate-800 text-sm leading-tight">{sop.title}</h4>
+                                                    <p className="text-[9px] text-slate-400 uppercase font-black">{sop.steps.length} Adım</p>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-1">
+                                                <button onClick={() => triggerQRScan(sop.id)} className="p-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-600 hover:text-white transition-all"><Icon name="Scan" size={14} /></button>
+                                                <button onClick={() => startEditing(sop)} className="p-2 text-slate-300 hover:text-orange-500"><Icon name="Edit" size={14} /></button>
+                                                <button onClick={() => setLibrary(library.filter(l => l.id !== sop.id))} className="p-2 text-slate-300 hover:text-red-500"><Icon name="Trash2" size={14} /></button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+
+            return (
+                <div className="min-h-screen bg-white font-sans text-slate-900 flex flex-col h-screen overflow-hidden">
+                    <header className="bg-white border-b border-slate-200 p-4 z-50 shadow-sm shrink-0 flex flex-col md:flex-row items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-blue-600 p-2 rounded-xl shadow-lg">
+                                <Icon name="Layers" size={22} className="text-white" />
+                            </div>
+                            <div>
+                                <h1 className="font-bold text-lg text-slate-800 leading-none">VisionGuide <span className="text-blue-600 italic">AR-SOP</span></h1>
+                                <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-1">Endüstriyel Simülasyon</p>
+                            </div>
+                        </div>
+                        <div className="flex bg-slate-100 p-1 rounded-2xl border border-slate-200 scale-90 md:scale-100">
+                            <button onClick={() => { resetSim(); setView('operator'); }} className={`px-4 py-2 rounded-xl text-[10px] font-black transition-all ${view === 'operator' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>OPERATÖR</button>
+                            <button onClick={() => { resetSim(); setView('admin'); }} className={`px-4 py-2 rounded-xl text-[10px] font-black transition-all ${view === 'admin' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>MÜHENDİS</button>
+                            <button onClick={() => { resetSim(); setView('dual'); }} className={`px-4 py-2 rounded-xl text-[10px] font-black transition-all ${view === 'dual' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>İKİLİ GÖRÜNÜM</button>
+                        </div>
+                    </header>
+                    <main className="flex-1 overflow-hidden h-full">
+                        {view === 'operator' && <OperatorSection />}
+                        {view === 'admin' && <div className="max-w-4xl mx-auto h-full"><EngineerSection /></div>}
+                        {view === 'dual' && (
+                            <div className="grid grid-cols-1 lg:grid-cols-2 h-full gap-0 lg:divide-x divide-slate-200">
+                                <div className="h-full border-b lg:border-b-0 overflow-hidden relative">
+                                    <div className="absolute top-2 left-6 z-40 bg-white/50 backdrop-blur-md px-3 py-1 rounded-full border border-slate-200 text-[8px] font-black uppercase text-slate-500 tracking-tighter">Operatör Önizleme</div>
+                                    <OperatorSection />
+                                </div>
+                                <div className="h-full overflow-hidden bg-white relative">
+                                    <div className="absolute top-2 left-6 z-40 bg-slate-50 px-3 py-1 rounded-full border border-slate-200 text-[8px] font-black uppercase text-slate-400 tracking-tighter">Yönetim Paneli</div>
+                                    <EngineerSection />
+                                </div>
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
